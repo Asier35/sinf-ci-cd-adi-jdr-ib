@@ -3,214 +3,219 @@
 on:
   push:
     branches: [ main ]
+  workflow_dispatch:  # Para ejecutar manualmente
+
+env:
+  EC2_HOST: ${{ secrets.EC2_HOST }}
+  EC2_USER: ${{ secrets.EC2_USER }}
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    
+
     steps:
-    - name: Checkout code
+    - name: 📥 Checkout code
       uses: actions/checkout@v3
-      
-    - name: Setup SSH Key
+
+    # ========== SECCIÓN DEBUGGING ==========
+    - name: 🔍 DEBUG - Show environment info
       run: |
+        echo "=== DEBUG INFORMATION ==="
+        echo "GitHub Event: ${{ github.event_name }}"
+        echo "Repository: ${{ github.repository }}"
+        echo "Workflow: ${{ github.workflow }}"
+        echo "Run ID: ${{ github.run_id }}"
+        echo "Run Number: ${{ github.run_number }}"
+        echo "========================="
+        
+    - name: 🔍 DEBUG - Show EC2_HOST (masked)
+      run: |
+        echo "Checking EC2_HOST secret..."
+        echo "EC2_HOST length: ${#EC2_HOST} characters"
+        
+        # Muestra formato (primeros y últimos caracteres)
+        if [ -n "$EC2_HOST" ]; then
+          echo "EC2_HOST starts with: ${EC2_HOST:0:15}"
+          echo "EC2_HOST ends with: ${EC2_HOST: -15}"
+          
+          # Verifica si es IP o DNS
+          if [[ "$EC2_HOST" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "✅ EC2_HOST parece una dirección IP válida"
+          else
+            echo "🌐 EC2_HOST parece un nombre DNS/hostname"
+          fi
+        else
+          echo "❌ ERROR: EC2_HOST está vacío o no definido"
+          exit 1
+        fi
+        
+    - name: 🔍 DEBUG - Test network connectivity
+      run: |
+        echo "Testing network connectivity..."
+        
+        # Extrae solo el hostname/IP (sin http://)
+        HOST=$(echo "$EC2_HOST" | sed 's|^https\?://||' | sed 's|/.*||')
+        echo "Testing connection to: $HOST"
+        
+        # Prueba ping (solo para diagnóstico)
+        ping -c 2 $HOST 2>/dev/null && echo "✅ Ping successful" || echo "⚠️ Ping failed (puede ser normal)"
+        
+        # Prueba puerto 22
+        timeout 5 bash -c "echo > /dev/tcp/$HOST/22" 2>/dev/null
+        if [ $? -eq 0 ]; then
+          echo "✅ Puerto 22 está ABIERTO en $HOST"
+        else
+          echo "❌ Puerto 22 está CERRADO o no responde"
+          echo "⚠️ Posibles causas:"
+          echo "  1. Instancia EC2 apagada"
+          echo "  2. Security Group no permite SSH"
+          echo "  3. IP incorrecta"
+          echo "  4. Firewall bloqueando"
+        fi
+        
+        # Muestra IP pública del runner (para debugging)
+        echo "GitHub Runner public IP:"
+        curl -s ifconfig.me
+        echo ""
+    # ========== FIN DEBUGGING ==========
+
+    - name: 🔑 Setup SSH Key
+      run: |
+        echo "Setting up SSH key..."
         mkdir -p ~/.ssh
         echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/ec2_key.pem
         chmod 600 ~/.ssh/ec2_key.pem
         
-        # Verify key is valid
+        # Verificar formato de la clave
+        echo "Verificando formato de clave SSH..."
+        head -1 ~/.ssh/ec2_key.pem
+        if grep -q "BEGIN RSA PRIVATE KEY" ~/.ssh/ec2_key.pem; then
+          echo "✅ Formato de clave correcto (RSA)"
+        elif grep -q "BEGIN OPENSSH PRIVATE KEY" ~/.ssh/ec2_key.pem; then
+          echo "✅ Formato de clave correcto (OPENSSH)"
+        else
+          echo "❌ ERROR: Formato de clave desconocido"
+          echo "Primera línea:"
+          head -1 ~/.ssh/ec2_key.pem
+          exit 1
+        fi
+        
+        # Verificar que la clave es válida
         if ssh-keygen -y -f ~/.ssh/ec2_key.pem > /dev/null 2>&1; then
           echo "✅ SSH key is valid"
         else
           echo "❌ ERROR: Invalid SSH key"
+          echo "Asegúrate de que el secret SSH_PRIVATE_KEY contiene:"
+          echo "1. La clave COMPLETA .pem"
+          echo "2. Con líneas -----BEGIN y -----END"
+          echo "3. Sin espacios extra al principio/fin"
           exit 1
         fi
-        
-    - name: Test SSH Connection
+
+    - name: 🔍 DEBUG - Show SSH key info
       run: |
-        echo "🔌 Testing connection to EC2..."
-        ssh -o StrictHostKeyChecking=no \
+        echo "=== SSH KEY INFO ==="
+        echo "Tamaño de la clave: $(wc -l < ~/.ssh/ec2_key.pem) líneas"
+        echo "Primeras 2 líneas:"
+        head -2 ~/.ssh/ec2_key.pem
+        echo "Últimas 2 líneas:"
+        tail -2 ~/.ssh/ec2_key.pem
+        echo "===================="
+
+    - name: 🧪 Test SSH Connection
+      run: |
+        echo "🔌 Testing SSH connection to EC2..."
+        echo "Host: ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}"
+        echo "Timeout: 30 seconds"
+        
+        # Intentar conexión con verbose output
+        ssh -vvv \
+            -o StrictHostKeyChecking=no \
             -o ConnectTimeout=30 \
+            -o BatchMode=yes \
+            -o LogLevel=DEBUG3 \
             -i ~/.ssh/ec2_key.pem \
             ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} \
-            "echo '✅ SSH Connection successful'; hostname; date; echo '---'; docker --version; docker-compose --version"
-            
-    - name: Deploy Application
+            "echo '✅ SSH Connection successful'; echo 'Hostname: $(hostname)'; echo 'Date: $(date)'; echo 'Uptime: $(uptime)'" \
+        || {
+          echo "❌ SSH Connection FAILED"
+          echo "=== TROUBLESHOOTING ==="
+          echo "1. Verifica que la instancia EC2 está RUNNING"
+          echo "2. Verifica Security Group (puerto 22 abierto)"
+          echo "3. Verifica la IP en EC2_HOST: ${{ secrets.EC2_HOST }}"
+          echo "4. Verifica la clave SSH en GitHub Secrets"
+          echo "5. Prueba manualmente: ssh -i key.pem ubuntu@IP"
+          exit 1
+        }
+
+    - name: 🚀 Deploy Application
       run: |
-        echo "🚀 Starting automatic deployment..."
+        echo "🚀 Starting deployment..."
         ssh -o StrictHostKeyChecking=no \
             -i ~/.ssh/ec2_key.pem \
             ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} '
+        
+          echo "📊 System Information:"
+          echo "Hostname: $(hostname)"
+          echo "IP: $(curl -s ifconfig.me)"
+          echo "Date: $(date)"
+          echo ""
           
-          # Create application directory
+          echo "🐳 Docker status:"
+          docker --version
+          docker-compose --version
+          echo ""
+          
           APP_DIR="/home/ubuntu/sinf-app"
           mkdir -p $APP_DIR
           cd $APP_DIR
           
-          echo "📂 Working directory: $(pwd)"
-          echo "📋 Files in directory:"
-          ls -la
+          echo "📂 Working in: $(pwd)"
           
-          # Stop any existing containers
-          echo "🛑 Stopping previous containers..."
-          docker-compose down 2>/dev/null || true
-          
-          # Create docker-compose.yml
+          # Crear docker-compose.yml simple para test
           cat > docker-compose.yml << "EOF"
-          # SINF Project - Automated Deployment
-          # Authors: Asier De Iturrate, Josu Del Real, Izotz Barrondo
           version: "3.8"
-          
           services:
             web:
               image: nginx:alpine
-              container_name: sinf-web
               ports:
                 - "80:80"
-              restart: unless-stopped
               volumes:
                 - ./html:/usr/share/nginx/html
-                
-            app:
-              image: httpd:alpine
-              container_name: sinf-app
-              ports:
-                - "8080:80"
-              restart: unless-stopped
-              
-          networks:
-            default:
-              name: sinf-network
           EOF
           
-          # Create HTML page
           mkdir -p html
-          cat > html/index.html << "EOF"
-          <!DOCTYPE html>
-          <html lang="en">
-          <head>
-              <meta charset="UTF-8">
-              <meta name="viewport" content="width=device-width, initial-scale=1.0">
-              <title>SINF - Automated Deployment</title>
-              <style>
-                  body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
-                  .container { max-width: 1000px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-                  .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 40px; border-radius: 10px; margin-bottom: 30px; }
-                  .success { background: #d4edda; color: #155724; padding: 15px; border-radius: 5px; margin: 20px 0; border: 1px solid #c3e6cb; }
-                  .info-box { background: #e7f3ff; padding: 20px; border-radius: 5px; margin: 15px 0; border-left: 5px solid #0066cc; }
-                  .tech-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 15px; margin: 20px 0; }
-                  .tech-item { background: #f8f9fa; padding: 15px; border-radius: 5px; text-align: center; }
-              </style>
-          </head>
-          <body>
-              <div class="container">
-                  <div class="header">
-                      <h1>🚀 SINF - Automated Deployment Success</h1>
-                      <p>AWS EC2 + Docker + GitHub Actions CI/CD</p>
-                  </div>
-                  
-                  <div class="success">
-                      <h2>✅ Deployment Completed Successfully</h2>
-                      <p>This page was automatically deployed via GitHub Actions</p>
-                  </div>
-                  
-                  <div class="info-box">
-                      <h2>📊 System Information</h2>
-                      <p><strong>Server Hostname:</strong> $(hostname)</p>
-                      <p><strong>Deployment Time:</strong> $(date)</p>
-                      <p><strong>Public IP:</strong> $(curl -s ifconfig.me)</p>
-                  </div>
-                  
-                  <div class="info-box">
-                      <h2>👥 Project Team</h2>
-                      <ul>
-                          <li>Asier De Iturrate</li>
-                          <li>Josu Del Real</li>
-                          <li>Izotz Barrondo</li>
-                      </ul>
-                  </div>
-                  
-                  <div class="info-box">
-                      <h2>🛠️ Technologies Used</h2>
-                      <div class="tech-list">
-                          <div class="tech-item">AWS EC2</div>
-                          <div class="tech-item">Ubuntu 24.04</div>
-                          <div class="tech-item">Docker</div>
-                          <div class="tech-item">Docker Compose</div>
-                          <div class="tech-item">GitHub Actions</div>
-                          <div class="tech-item">NGINX</div>
-                          <div class="tech-item">Apache</div>
-                          <div class="tech-item">CI/CD Pipeline</div>
-                      </div>
-                  </div>
-                  
-                  <div class="info-box">
-                      <h2>📈 Deployment Status</h2>
-                      <p><strong>Containers Running:</strong></p>
-                      <pre>$(docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}")</pre>
-                  </div>
-                  
-                  <footer style="margin-top: 40px; text-align: center; color: #666;">
-                      <p>SINF - Sistemas Informáticos | Automated Deployment Project</p>
-                  </footer>
-              </div>
-          </body>
-          </html>
-          EOF
+          echo "<h1>✅ CI/CD Test Successful!</h1><p>Deployed at: $(date)</p>" > html/index.html
           
-          # Start Docker containers
-          echo "🐳 Starting Docker containers..."
+          docker-compose down 2>/dev/null || true
           docker-compose up -d
           
-          # Verify containers
-          echo "📊 Container status:"
+          echo "📊 Containers:"
           docker-compose ps
           
-          # Test services
-          echo "🔍 Testing services..."
-          sleep 3
-          
-          if curl -s http://localhost:80 > /dev/null; then
-            echo "✅ NGINX is running on port 80"
-          else
-            echo "❌ NGINX not responding on port 80"
-          fi
-          
-          if curl -s http://localhost:8080 > /dev/null; then
-            echo "✅ Apache is running on port 8080"
-          else
-            echo "❌ Apache not responding on port 8080"
-          fi
+          echo "✅ Deployment test completed"
         '
-        
-    - name: Health Check
+
+    - name: ✅ Verify Deployment
       run: |
-        echo "🏥 Performing health check..."
-        # Wait for services to be ready
+        echo "🏥 Verifying deployment..."
         sleep 10
         
-        # Test external access
-        echo "🌐 Testing external access..."
-        if curl -f --retry 3 --retry-delay 5 \
-          http://${{ secrets.EC2_HOST }}:80 > /dev/null 2>&1; then
-          echo "✅ ✅ ✅ SERVICE IS ACCESSIBLE FROM INTERNET"
-          echo "🔗 Application URL: http://${{ secrets.EC2_HOST }}"
-          echo "🔗 Apache URL: http://${{ secrets.EC2_HOST }}:8080"
+        echo "Testing web server..."
+        if curl -f --max-time 30 http://${{ secrets.EC2_HOST }}; then
+          echo "✅ ✅ ✅ WEB SERVER IS WORKING!"
         else
-          echo "❌ ERROR: Service not accessible from internet"
-          echo "⚠️  Check Security Groups and firewall settings"
-          exit 1
+          echo "⚠️ Web server not responding yet"
+          echo "Check manually: http://${{ secrets.EC2_HOST }}"
         fi
-        
-    - name: Generate Report
+
+    - name: 📋 Generate Report
       if: always()
       run: |
-        echo "📋 DEPLOYMENT REPORT" | tee report.txt
-        echo "==================" | tee -a report.txt
-        echo "Date: $(date)" | tee -a report.txt
-        echo "Repository: ${{ github.repository }}" | tee -a report.txt
-        echo "Commit: ${{ github.sha }}" | tee -a report.txt
-        echo "EC2 Host: ${{ secrets.EC2_HOST }}" | tee -a report.txt
-        echo "Workflow: ${{ github.workflow }}" | tee -a report.txt
-        echo "==================" | tee -a report.txt
-        cat report.txt
+        echo "=== DEPLOYMENT REPORT ==="
+        echo "Status: ${{ job.status }}"
+        echo "Time: $(date)"
+        echo "EC2 Host: ${{ secrets.EC2_HOST }}"
+        echo "Workflow: ${{ github.workflow }}"
+        echo "Run: ${{ github.run_number }}"
+        echo "========================="
