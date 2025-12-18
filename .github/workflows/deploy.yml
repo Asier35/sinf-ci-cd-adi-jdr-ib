@@ -1,0 +1,216 @@
+﻿name: Deploy to EC2 - SINF Project
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      
+    - name: Setup SSH Key
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/ec2_key.pem
+        chmod 600 ~/.ssh/ec2_key.pem
+        
+        # Verify key is valid
+        if ssh-keygen -y -f ~/.ssh/ec2_key.pem > /dev/null 2>&1; then
+          echo "✅ SSH key is valid"
+        else
+          echo "❌ ERROR: Invalid SSH key"
+          exit 1
+        fi
+        
+    - name: Test SSH Connection
+      run: |
+        echo "🔌 Testing connection to EC2..."
+        ssh -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=30 \
+            -i ~/.ssh/ec2_key.pem \
+            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} \
+            "echo '✅ SSH Connection successful'; hostname; date; echo '---'; docker --version; docker-compose --version"
+            
+    - name: Deploy Application
+      run: |
+        echo "🚀 Starting automatic deployment..."
+        ssh -o StrictHostKeyChecking=no \
+            -i ~/.ssh/ec2_key.pem \
+            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} '
+          
+          # Create application directory
+          APP_DIR="/home/ubuntu/sinf-app"
+          mkdir -p $APP_DIR
+          cd $APP_DIR
+          
+          echo "📂 Working directory: $(pwd)"
+          echo "📋 Files in directory:"
+          ls -la
+          
+          # Stop any existing containers
+          echo "🛑 Stopping previous containers..."
+          docker-compose down 2>/dev/null || true
+          
+          # Create docker-compose.yml
+          cat > docker-compose.yml << "EOF"
+          # SINF Project - Automated Deployment
+          # Authors: Asier De Iturrate, Josu Del Real, Izotz Barrondo
+          version: "3.8"
+          
+          services:
+            web:
+              image: nginx:alpine
+              container_name: sinf-web
+              ports:
+                - "80:80"
+              restart: unless-stopped
+              volumes:
+                - ./html:/usr/share/nginx/html
+                
+            app:
+              image: httpd:alpine
+              container_name: sinf-app
+              ports:
+                - "8080:80"
+              restart: unless-stopped
+              
+          networks:
+            default:
+              name: sinf-network
+          EOF
+          
+          # Create HTML page
+          mkdir -p html
+          cat > html/index.html << "EOF"
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>SINF - Automated Deployment</title>
+              <style>
+                  body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
+                  .container { max-width: 1000px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+                  .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 40px; border-radius: 10px; margin-bottom: 30px; }
+                  .success { background: #d4edda; color: #155724; padding: 15px; border-radius: 5px; margin: 20px 0; border: 1px solid #c3e6cb; }
+                  .info-box { background: #e7f3ff; padding: 20px; border-radius: 5px; margin: 15px 0; border-left: 5px solid #0066cc; }
+                  .tech-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 15px; margin: 20px 0; }
+                  .tech-item { background: #f8f9fa; padding: 15px; border-radius: 5px; text-align: center; }
+              </style>
+          </head>
+          <body>
+              <div class="container">
+                  <div class="header">
+                      <h1>🚀 SINF - Automated Deployment Success</h1>
+                      <p>AWS EC2 + Docker + GitHub Actions CI/CD</p>
+                  </div>
+                  
+                  <div class="success">
+                      <h2>✅ Deployment Completed Successfully</h2>
+                      <p>This page was automatically deployed via GitHub Actions</p>
+                  </div>
+                  
+                  <div class="info-box">
+                      <h2>📊 System Information</h2>
+                      <p><strong>Server Hostname:</strong> $(hostname)</p>
+                      <p><strong>Deployment Time:</strong> $(date)</p>
+                      <p><strong>Public IP:</strong> $(curl -s ifconfig.me)</p>
+                  </div>
+                  
+                  <div class="info-box">
+                      <h2>👥 Project Team</h2>
+                      <ul>
+                          <li>Asier De Iturrate</li>
+                          <li>Josu Del Real</li>
+                          <li>Izotz Barrondo</li>
+                      </ul>
+                  </div>
+                  
+                  <div class="info-box">
+                      <h2>🛠️ Technologies Used</h2>
+                      <div class="tech-list">
+                          <div class="tech-item">AWS EC2</div>
+                          <div class="tech-item">Ubuntu 24.04</div>
+                          <div class="tech-item">Docker</div>
+                          <div class="tech-item">Docker Compose</div>
+                          <div class="tech-item">GitHub Actions</div>
+                          <div class="tech-item">NGINX</div>
+                          <div class="tech-item">Apache</div>
+                          <div class="tech-item">CI/CD Pipeline</div>
+                      </div>
+                  </div>
+                  
+                  <div class="info-box">
+                      <h2>📈 Deployment Status</h2>
+                      <p><strong>Containers Running:</strong></p>
+                      <pre>$(docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}")</pre>
+                  </div>
+                  
+                  <footer style="margin-top: 40px; text-align: center; color: #666;">
+                      <p>SINF - Sistemas Informáticos | Automated Deployment Project</p>
+                  </footer>
+              </div>
+          </body>
+          </html>
+          EOF
+          
+          # Start Docker containers
+          echo "🐳 Starting Docker containers..."
+          docker-compose up -d
+          
+          # Verify containers
+          echo "📊 Container status:"
+          docker-compose ps
+          
+          # Test services
+          echo "🔍 Testing services..."
+          sleep 3
+          
+          if curl -s http://localhost:80 > /dev/null; then
+            echo "✅ NGINX is running on port 80"
+          else
+            echo "❌ NGINX not responding on port 80"
+          fi
+          
+          if curl -s http://localhost:8080 > /dev/null; then
+            echo "✅ Apache is running on port 8080"
+          else
+            echo "❌ Apache not responding on port 8080"
+          fi
+        '
+        
+    - name: Health Check
+      run: |
+        echo "🏥 Performing health check..."
+        # Wait for services to be ready
+        sleep 10
+        
+        # Test external access
+        echo "🌐 Testing external access..."
+        if curl -f --retry 3 --retry-delay 5 \
+          http://${{ secrets.EC2_HOST }}:80 > /dev/null 2>&1; then
+          echo "✅ ✅ ✅ SERVICE IS ACCESSIBLE FROM INTERNET"
+          echo "🔗 Application URL: http://${{ secrets.EC2_HOST }}"
+          echo "🔗 Apache URL: http://${{ secrets.EC2_HOST }}:8080"
+        else
+          echo "❌ ERROR: Service not accessible from internet"
+          echo "⚠️  Check Security Groups and firewall settings"
+          exit 1
+        fi
+        
+    - name: Generate Report
+      if: always()
+      run: |
+        echo "📋 DEPLOYMENT REPORT" | tee report.txt
+        echo "==================" | tee -a report.txt
+        echo "Date: $(date)" | tee -a report.txt
+        echo "Repository: ${{ github.repository }}" | tee -a report.txt
+        echo "Commit: ${{ github.sha }}" | tee -a report.txt
+        echo "EC2 Host: ${{ secrets.EC2_HOST }}" | tee -a report.txt
+        echo "Workflow: ${{ github.workflow }}" | tee -a report.txt
+        echo "==================" | tee -a report.txt
+        cat report.txt

@@ -1,0 +1,53 @@
+﻿# Sistemako fitxategiak / System files
+.DS_Store
+Thumbs.db
+*.tmp
+*.temp
+/tmp/
+
+# Android
+*.apk
+*.ap_
+*.dex
+*.class
+**/build/
+**/gen/
+**/bin/
+**/.gradle/
+**/local.properties
+
+# IDE
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+
+# SSH keys
+*.pem
+*.key
+id_rsa
+id_dsa
+
+# Environment variables
+.env
+.env.local
+.env.production
+
+# Logs
+*.log
+logs/
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# Docker
+.docker/
